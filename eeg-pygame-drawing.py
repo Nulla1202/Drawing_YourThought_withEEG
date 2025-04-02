@@ -4,17 +4,26 @@ import pygame
 import sys
 import threading
 import time
+import json
+import os
 from datetime import datetime
 
 # Simple neural network class for EEG data
 class SimpleEEGNetwork:
-    def __init__(self, input_size, hidden_size, output_size):
-        # Random initialization of weights
-        np.random.seed(42)  # For reproducible results
-        self.w1 = np.random.randn(input_size, hidden_size) * 0.1
-        self.b1 = np.zeros((1, hidden_size))
-        self.w2 = np.random.randn(hidden_size, output_size) * 0.1
-        self.b2 = np.zeros((1, output_size))
+    def __init__(self, input_size, hidden_size, output_size, weights=None):
+        # Initialize with provided weights or random weights
+        if weights is not None:
+            self.w1 = weights['w1']
+            self.b1 = weights['b1']
+            self.w2 = weights['w2']
+            self.b2 = weights['b2']
+        else:
+            # Random initialization of weights
+            np.random.seed(42)  # For reproducible results
+            self.w1 = np.random.randn(input_size, hidden_size) * 0.1
+            self.b1 = np.zeros((1, hidden_size))
+            self.w2 = np.random.randn(hidden_size, output_size) * 0.1
+            self.b2 = np.zeros((1, output_size))
     
     def sigmoid(self, x):
         return 1 / (1 + np.exp(-x))
@@ -32,6 +41,77 @@ class SimpleEEGNetwork:
         a2 = self.sigmoid(z2)
         
         return a2.flatten()  # Return as 1D array
+    
+    def get_weights(self):
+        return {
+            'w1': self.w1.tolist(),
+            'b1': self.b1.tolist(),
+            'w2': self.w2.tolist(),
+            'b2': self.b2.tolist()
+        }
+    
+    def train(self, training_data):
+        """
+        Simple training method using the collected data samples.
+        This is a very basic approach - in a real application, you would use
+        a more sophisticated training algorithm.
+        
+        training_data: dict with keys 'on', 'off', 'up', 'down', 'left', 'right'
+                      each containing lists of EEG samples
+        """
+        # Calculate average EEG pattern for each state
+        state_averages = {}
+        for state, samples in training_data.items():
+            if samples:  # Only process if we have samples
+                # Convert list of samples to numpy array
+                samples_array = np.array(samples)
+                # Calculate average
+                state_averages[state] = np.mean(samples_array, axis=0)
+        
+        # If we have enough state averages, use them to adjust weights
+        required_states = ['on', 'off', 'up', 'down', 'left', 'right']
+        if all(state in state_averages for state in required_states):
+            # This is a very simplified approach to weight adjustment
+            # In a real application, you'd use proper backpropagation
+            
+            # For output 1 (on/off), adjust to recognize the difference between on and off states
+            on_off_diff = state_averages['on'] - state_averages['off']
+            
+            # For outputs 2-5 (up, down, left, right), adjust to recognize respective patterns
+            direction_diffs = [
+                state_averages['up'] - np.mean([state_averages[d] for d in ['down', 'left', 'right']], axis=0),
+                state_averages['down'] - np.mean([state_averages[d] for d in ['up', 'left', 'right']], axis=0),
+                state_averages['left'] - np.mean([state_averages[d] for d in ['up', 'down', 'right']], axis=0),
+                state_averages['right'] - np.mean([state_averages[d] for d in ['up', 'down', 'left']], axis=0)
+            ]
+            
+            # Very simple weight adjustment - in reality, you'd need a proper training algorithm
+            # This is just a proof of concept
+            input_size = self.w1.shape[0]
+            hidden_size = self.w1.shape[1]
+            
+            # Initialize new weights - we'll completely replace the random weights
+            self.w1 = np.random.randn(input_size, hidden_size) * 0.01
+            
+            # Incorporate the state differences into the weights
+            for i in range(input_size):
+                # For on/off detection
+                if i < len(on_off_diff):
+                    self.w1[i, 0] += on_off_diff[i] * 0.1
+                
+                # For direction detection
+                for j, diff in enumerate(direction_diffs):
+                    if i < len(diff):
+                        self.w1[i, j+1] += diff[i] * 0.1
+            
+            # Output layer weights - simplified approach
+            self.w2 = np.zeros_like(self.w2)
+            for i in range(5):  # 5 outputs
+                self.w2[i, i] = 1.0  # Direct mapping
+            
+            return True  # Training successful
+        
+        return False  # Not enough data
 
 # Parse EEG data from the message
 def parse_eeg_data(message):
@@ -95,10 +175,94 @@ output_timestamp = None
 connection_status = "disconnected"
 drawing_history = []
 current_history_index = -1
+latest_eeg_data = None
+training_data = {
+    'on': [],
+    'off': [],
+    'up': [],
+    'down': [],
+    'left': [],
+    'right': []
+}
+current_training_state = None
+nn = None  # Neural network instance
+
+# Function to save training data to file
+def save_training_data(filename="brain_canvas_training.json"):
+    global training_data
+    try:
+        # Convert numpy arrays to lists for JSON serialization
+        serializable_data = {}
+        for state, samples in training_data.items():
+            serializable_data[state] = [sample.tolist() for sample in samples]
+        
+        with open(filename, 'w') as f:
+            json.dump(serializable_data, f)
+        
+        print(f"Training data saved to {filename}")
+        return True
+    except Exception as e:
+        print(f"Error saving training data: {e}")
+        return False
+
+# Function to load training data from file
+def load_training_data(filename="brain_canvas_training.json"):
+    global training_data
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                loaded_data = json.load(f)
+            
+            # Convert lists back to numpy arrays
+            for state, samples in loaded_data.items():
+                training_data[state] = [np.array(sample) for sample in samples]
+            
+            print(f"Training data loaded from {filename}")
+            return True
+        else:
+            print(f"Training file {filename} not found")
+            return False
+    except Exception as e:
+        print(f"Error loading training data: {e}")
+        return False
+
+# Function to save neural network weights
+def save_network_weights(nn, filename="brain_canvas_weights.json"):
+    try:
+        weights = nn.get_weights()
+        with open(filename, 'w') as f:
+            json.dump(weights, f)
+        
+        print(f"Neural network weights saved to {filename}")
+        return True
+    except Exception as e:
+        print(f"Error saving neural network weights: {e}")
+        return False
+
+# Function to load neural network weights
+def load_network_weights(input_size, hidden_size, output_size, filename="brain_canvas_weights.json"):
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'r') as f:
+                weights = json.load(f)
+            
+            # Convert lists back to numpy arrays
+            for key in weights:
+                weights[key] = np.array(weights[key])
+            
+            nn = SimpleEEGNetwork(input_size, hidden_size, output_size, weights)
+            print(f"Neural network weights loaded from {filename}")
+            return nn
+        else:
+            print(f"Weights file {filename} not found, initializing with random weights")
+            return SimpleEEGNetwork(input_size, hidden_size, output_size)
+    except Exception as e:
+        print(f"Error loading neural network weights: {e}")
+        return SimpleEEGNetwork(input_size, hidden_size, output_size)
 
 # Function to receive EEG data via UDP
 def udp_receiver(ip_address, port_number):
-    global latest_outputs, output_timestamp, connection_status
+    global latest_outputs, output_timestamp, connection_status, latest_eeg_data, nn
     
     # Create UDP socket
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -106,7 +270,6 @@ def udp_receiver(ip_address, port_number):
     # Initialize neural network settings
     hidden_size = 10
     output_size = 5  # 1 for on/off, 4 for directions (up, down, left, right)
-    nn = None
     
     try:
         s.bind((ip_address, port_number))
@@ -127,10 +290,20 @@ def udp_receiver(ip_address, port_number):
             eeg_data = parse_eeg_data(message)
             
             if eeg_data is not None and len(eeg_data) > 0:
+                # Store the latest EEG data (for training)
+                latest_eeg_data = eeg_data
+                
                 # Initialize network if this is the first data or if input size changed
-                if nn is None or nn.w1.shape[0] != len(eeg_data):
+                if nn is None:
                     input_size = len(eeg_data)
                     print(f"Initializing neural network with input size: {input_size}")
+                    
+                    # Try to load saved weights first
+                    nn = load_network_weights(input_size, hidden_size, output_size)
+                elif nn.w1.shape[0] != len(eeg_data):
+                    # If input size has changed, reinitialize the network
+                    input_size = len(eeg_data)
+                    print(f"Reinitializing neural network with new input size: {input_size}")
                     nn = SimpleEEGNetwork(input_size, hidden_size, output_size)
                 
                 # Process the data
@@ -180,17 +353,20 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 BLUE = (0, 0, 255)
 YELLOW = (255, 255, 0)
+PURPLE = (128, 0, 128)
 
 # Main function
 def main():
     global latest_outputs, output_timestamp, connection_status, drawing_history, current_history_index
+    global training_data, current_training_state, latest_eeg_data, nn
     
     # Create screen
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    pygame.display.set_caption("EEG Drawing App")
+    pygame.display.set_caption("BrainCanvas - EEG Drawing App")
     
-    # Create font
+    # Create fonts
     font = pygame.font.SysFont(None, FONT_SIZE)
+    large_font = pygame.font.SysFont(None, FONT_SIZE * 2)
     
     # Create canvas surface
     canvas = pygame.Surface((CANVAS_WIDTH, CANVAS_HEIGHT))
@@ -209,10 +385,18 @@ def main():
     udp_thread.start()
     
     # Drawing state variables
-    drawing_mode = "manual"  # or "auto"
+    drawing_mode = "manual"  # "manual", "auto", or "training"
     tool = "pencil"  # or "eraser"
     cursor_pos = [CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2]
     is_drawing = False
+    
+    # Training variables
+    training_sequence = ['on', 'off', 'up', 'down', 'left', 'right']
+    training_index = 0
+    training_samples_per_state = 5
+    training_current_samples = 0
+    training_timer = 0
+    training_state = "ready"  # "ready", "collect", "complete"
     
     # Buttons
     buttons = {
@@ -222,6 +406,9 @@ def main():
         "clear": pygame.Rect(CANVAS_WIDTH + BUTTON_MARGIN + BUTTON_WIDTH + BUTTON_MARGIN, BUTTON_MARGIN*2 + BUTTON_HEIGHT, BUTTON_WIDTH, BUTTON_HEIGHT),
         "mode": pygame.Rect(CANVAS_WIDTH + BUTTON_MARGIN, BUTTON_MARGIN*3 + BUTTON_HEIGHT*2, BUTTON_WIDTH*2 + BUTTON_MARGIN, BUTTON_HEIGHT),
         "save": pygame.Rect(CANVAS_WIDTH + BUTTON_MARGIN, BUTTON_MARGIN*4 + BUTTON_HEIGHT*3, BUTTON_WIDTH, BUTTON_HEIGHT),
+        "train_start": pygame.Rect(CANVAS_WIDTH + BUTTON_MARGIN, BUTTON_MARGIN*5 + BUTTON_HEIGHT*4, BUTTON_WIDTH*2 + BUTTON_MARGIN, BUTTON_HEIGHT),
+        "save_training": pygame.Rect(CANVAS_WIDTH + BUTTON_MARGIN, BUTTON_MARGIN*6 + BUTTON_HEIGHT*5, BUTTON_WIDTH, BUTTON_HEIGHT),
+        "load_training": pygame.Rect(CANVAS_WIDTH + BUTTON_MARGIN + BUTTON_WIDTH + BUTTON_MARGIN, BUTTON_MARGIN*6 + BUTTON_HEIGHT*5, BUTTON_WIDTH, BUTTON_HEIGHT),
     }
     
     # Main loop
@@ -256,11 +443,40 @@ def main():
                         drawing_history = [pygame.Surface.copy(canvas)]
                         current_history_index = 0
                     elif buttons["mode"].collidepoint(event.pos):
-                        drawing_mode = "auto" if drawing_mode == "manual" else "manual"
+                        # Cycle through modes: manual -> auto -> training -> manual
+                        if drawing_mode == "manual":
+                            drawing_mode = "auto"
+                        elif drawing_mode == "auto":
+                            drawing_mode = "training"
+                            training_state = "ready"
+                            training_index = 0
+                            training_current_samples = 0
+                        else:
+                            drawing_mode = "manual"
                     elif buttons["save"].collidepoint(event.pos):
                         save_path = f"eeg_drawing_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                         pygame.image.save(canvas, save_path)
                         print(f"Canvas saved to {save_path}")
+                    elif buttons["train_start"].collidepoint(event.pos) and drawing_mode == "training":
+                        if training_state == "ready":
+                            training_state = "collect"
+                            training_timer = time.time()
+                        elif training_state == "complete":
+                            # Train the neural network
+                            if nn is not None and nn.train(training_data):
+                                # Save the trained weights
+                                save_network_weights(nn)
+                                training_state = "ready"
+                                training_index = 0
+                                training_current_samples = 0
+                    elif buttons["save_training"].collidepoint(event.pos):
+                        save_training_data()
+                    elif buttons["load_training"].collidepoint(event.pos):
+                        if load_training_data():
+                            # Re-train the network with loaded data
+                            if nn is not None:
+                                nn.train(training_data)
+                                save_network_weights(nn)
             
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1 and is_drawing:  # Left click release
@@ -333,6 +549,30 @@ def main():
                     current_history_index = len(drawing_history) - 1
                     last_auto_save = current_time
         
+        # Handle training mode
+        if drawing_mode == "training" and training_state == "collect" and latest_eeg_data is not None:
+            current_state = training_sequence[training_index]
+            current_training_state = current_state
+            
+            # Collect data samples
+            current_time = time.time()
+            # Allow 3 seconds between samples to stabilize
+            if current_time - training_timer > 3:
+                # Add the current EEG data to the training set
+                training_data[current_state].append(latest_eeg_data)
+                training_current_samples += 1
+                training_timer = current_time
+                
+                # Check if we have enough samples for the current state
+                if training_current_samples >= training_samples_per_state:
+                    training_index += 1
+                    training_current_samples = 0
+                    
+                    # Check if training is complete
+                    if training_index >= len(training_sequence):
+                        training_state = "complete"
+                        current_training_state = None
+        
         # Draw the screen
         screen.fill(LIGHT_GRAY)
         
@@ -347,13 +587,63 @@ def main():
             cursor_color = RED if latest_outputs is not None and latest_outputs[0] >= 0.5 else YELLOW
             pygame.draw.circle(screen, cursor_color, (int(cursor_pos[0]), int(cursor_pos[1])), 5, 1)
         
+        # Draw training instructions in training mode
+        if drawing_mode == "training" and training_state == "collect":
+            # Draw an overlay with the current instruction
+            overlay = pygame.Surface((CANVAS_WIDTH, CANVAS_HEIGHT), pygame.SRCALPHA)
+            overlay.fill((0, 0, 0, 128))  # Semi-transparent black
+            screen.blit(overlay, (0, 0))
+            
+            current_state = training_sequence[training_index]
+            
+            # Display the instruction
+            if current_state == "on":
+                instruction = "Think about DRAWING (On state)"
+            elif current_state == "off":
+                instruction = "Think about NOT DRAWING (Off state)"
+            else:
+                instruction = f"Think about moving {current_state.upper()} direction"
+            
+            text = large_font.render(instruction, True, WHITE)
+            text_rect = text.get_rect(center=(CANVAS_WIDTH//2, CANVAS_HEIGHT//2))
+            screen.blit(text, text_rect)
+            
+            # Display the sample counter
+            counter_text = font.render(f"Sample {training_current_samples + 1}/{training_samples_per_state} for {current_state}", True, WHITE)
+            counter_rect = counter_text.get_rect(center=(CANVAS_WIDTH//2, CANVAS_HEIGHT//2 + 40))
+            screen.blit(counter_text, counter_rect)
+            
+            # Display the countdown
+            countdown = max(0, int(3 - (time.time() - training_timer)))
+            countdown_text = large_font.render(str(countdown), True, WHITE)
+            countdown_rect = countdown_text.get_rect(center=(CANVAS_WIDTH//2, CANVAS_HEIGHT//2 + 80))
+            screen.blit(countdown_text, countdown_rect)
+        
         # Draw sidebar
         pygame.draw.rect(screen, GRAY, (CANVAS_WIDTH, 0, SIDEBAR_WIDTH, SCREEN_HEIGHT))
         
         # Draw buttons
         for btn_name, btn_rect in buttons.items():
+            # Skip training-specific buttons if not in training mode
+            if btn_name.startswith("train_") and drawing_mode != "training":
+                continue
+            
             if btn_name == "mode":
-                color = GREEN if drawing_mode == "auto" else BLUE
+                if drawing_mode == "auto":
+                    color = BLUE
+                elif drawing_mode == "training":
+                    color = PURPLE
+                else:
+                    color = GREEN
+            elif btn_name == "train_start":
+                if training_state == "ready":
+                    color = GREEN
+                elif training_state == "collect":
+                    color = YELLOW
+                elif training_state == "complete":
+                    color = PURPLE
+                else:
+                    color = GRAY
             elif btn_name == tool:
                 color = BLUE
             else:
@@ -364,8 +654,17 @@ def main():
             # Button text
             if btn_name == "mode":
                 label = f"Mode: {drawing_mode.upper()}"
+            elif btn_name == "train_start":
+                if training_state == "ready":
+                    label = "Start Training"
+                elif training_state == "collect":
+                    label = "Training..."
+                elif training_state == "complete":
+                    label = "Save Model"
+                else:
+                    label = "Train"
             else:
-                label = btn_name.capitalize()
+                label = btn_name.replace("_", " ").capitalize()
             
             text = font.render(label, True, WHITE)
             text_rect = text.get_rect(center=btn_rect.center)
@@ -424,11 +723,27 @@ def main():
                     output_label = font.render(str(i), True, BLACK)
                     screen.blit(output_label, (CANVAS_WIDTH + 20 + i * 40, CANVAS_HEIGHT - 190))
         
+        # Draw training data statistics in training mode
+        if drawing_mode == "training":
+            y_pos = 250
+            training_stats_title = font.render("Training Data Stats:", True, BLACK)
+            screen.blit(training_stats_title, (CANVAS_WIDTH + 10, y_pos))
+            y_pos += 25
+            
+            for state, samples in training_data.items():
+                samples_text = font.render(f"{state}: {len(samples)} samples", True, BLACK)
+                screen.blit(samples_text, (CANVAS_WIDTH + 10, y_pos))
+                y_pos += 20
+        
         # Update the display
         pygame.display.flip()
         
         # Cap the frame rate
         clock.tick(60)
+    
+    # Save training data before exit if training was done
+    if any(len(samples) > 0 for samples in training_data.values()):
+        save_training_data()
     
     # Quit pygame
     pygame.quit()
